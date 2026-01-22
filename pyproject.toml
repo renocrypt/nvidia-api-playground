@@ -9,10 +9,19 @@ requires-python = ">=3.12"
 dependencies = [
     "python-dotenv>=1.2.1",
     "requests>=2.32.5",
+    "textual>=0.50.0",
+    "pillow>=10.0.0",
+    "rich-pixels>=3.0.1",
+    "trimesh>=4.0.0",
+    "pyglet<2",
+    "pyrender>=0.1.45",
+    "pyvista>=0.46.5",
 ]
 
 [project.scripts]
 nvidia-trellis = "nvidia.trellis.text_to_glb:main"
+nvidia-trellis-tui = "nvidia.trellis.tui:main"
+nvidia-chat = "nvidia.llm.tui:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]

@@ -18,6 +18,7 @@ import getpass
 import json
 import os
 import time
+from dataclasses import dataclass
 from pathlib import Path
 
 import requests
@@ -25,9 +26,12 @@ from dotenv import load_dotenv
 
 
 DEFAULT_INVOKE_URL = "https://ai.api.nvidia.com/v1/genai/microsoft/trellis"
+MAX_PROMPT_LENGTH = 77
 
 
-def _load_env(project_root: Path) -> None:
+def _load_env(project_root: Path | None = None) -> None:
+    if project_root is None:
+        project_root = Path(__file__).resolve().parents[3]
     load_dotenv(project_root / ".env", override=False)
     load_dotenv(project_root / ".env.local", override=False)
 
@@ -37,6 +41,113 @@ def _get_api_key() -> str:
     if api_key:
         return api_key
     return getpass.getpass("Enter NVIDIA_API_KEY (input hidden): ").strip()
+
+
+@dataclass
+class TrellisResult:
+    """Result from Trellis 3D generation."""
+
+    glb_data: bytes
+    seed_used: int
+
+
+class TrellisError(Exception):
+    """Error from Trellis API."""
+
+    pass
+
+
+def generate_glb(
+    prompt: str,
+    seed: int = 0,
+    slat_cfg_scale: float = 3.0,
+    ss_cfg_scale: float = 7.5,
+    slat_sampling_steps: int = 25,
+    ss_sampling_steps: int = 25,
+    timeout: float = 300.0,
+    truncate: bool = True,
+) -> TrellisResult:
+    """
+    Generate a GLB 3D model from a text prompt using Trellis API.
+
+    Args:
+        prompt: Text description of the 3D object (max 77 chars)
+        seed: Random seed (0 for random)
+        slat_cfg_scale: Classifier-free guidance scale for structured latent diffusion
+        ss_cfg_scale: Classifier-free guidance scale for sparse structure diffusion
+        slat_sampling_steps: Number of sampling steps for structured latent
+        ss_sampling_steps: Number of sampling steps for sparse structure
+        timeout: Request timeout in seconds
+        truncate: If True, truncate prompt to 77 chars; if False, raise error
+
+    Returns:
+        TrellisResult with glb_data bytes and seed_used
+
+    Raises:
+        TrellisError: If API call fails or returns invalid response
+        ValueError: If prompt is empty or too long (when truncate=False)
+    """
+    prompt = prompt.strip()
+    if not prompt:
+        raise ValueError("prompt cannot be empty")
+
+    if len(prompt) > MAX_PROMPT_LENGTH:
+        if truncate:
+            prompt = prompt[:MAX_PROMPT_LENGTH]
+        else:
+            raise ValueError(f"prompt too long ({len(prompt)} chars). Must be <= {MAX_PROMPT_LENGTH}.")
+
+    api_key = _get_api_key()
+    if not api_key:
+        raise TrellisError("Missing NVIDIA_API_KEY")
+
+    headers = {
+        "Authorization": f"Bearer {api_key}",
+        "Accept": "application/json",
+        "Content-Type": "application/json",
+    }
+    payload = {
+        "prompt": prompt,
+        "slat_cfg_scale": slat_cfg_scale,
+        "ss_cfg_scale": ss_cfg_scale,
+        "slat_sampling_steps": slat_sampling_steps,
+        "ss_sampling_steps": ss_sampling_steps,
+        "seed": seed,
+    }
+
+    resp = requests.post(DEFAULT_INVOKE_URL, headers=headers, json=payload, timeout=timeout)
+
+    try:
+        body = resp.json()
+    except ValueError:
+        raise TrellisError(f"Invalid JSON response: {resp.text[:1000]}")
+
+    if resp.status_code < 200 or resp.status_code >= 300:
+        raise TrellisError(f"HTTP {resp.status_code}: {json.dumps(body, indent=2)[:1000]}")
+
+    artifacts = body.get("artifacts") if isinstance(body, dict) else None
+    if not isinstance(artifacts, list) or not artifacts or not isinstance(artifacts[0], dict):
+        raise TrellisError(f"Response did not contain artifacts[0]: {json.dumps(body, indent=2)[:1000]}")
+
+    artifact = artifacts[0]
+    if artifact.get("finishReason") and artifact["finishReason"] != "SUCCESS":
+        raise TrellisError(f"finishReason={artifact.get('finishReason')!r}")
+
+    b64 = artifact.get("base64")
+    if not isinstance(b64, str) or not b64:
+        raise TrellisError("artifacts[0].base64 missing/empty")
+
+    glb_data = base64.b64decode(b64)
+    seed_used = artifact.get("seed", seed)
+
+    return TrellisResult(glb_data=glb_data, seed_used=seed_used)
+
+
+def get_output_dir() -> Path:
+    """Get the default output directory for GLB files."""
+    out_dir = Path(__file__).resolve().parent / "output"
+    out_dir.mkdir(parents=True, exist_ok=True)
+    return out_dir
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -75,79 +186,38 @@ def main(argv: list[str] | None = None) -> int:
     )
     args = parser.parse_args(argv)
 
-    project_root = Path(__file__).resolve().parents[3]
-    _load_env(project_root)
-    api_key = _get_api_key()
-    if not api_key:
-        print("Error: Missing NVIDIA_API_KEY (set env var or put it in .env.local).")
-        return 2
+    _load_env()
 
     prompt = args.prompt.strip()
-    if not prompt:
-        print("Error: prompt cannot be empty.")
-        return 2
-    if len(prompt) > 77:
+    if len(prompt) > MAX_PROMPT_LENGTH:
         if args.truncate:
-            print(f"Warning: truncating prompt from {len(prompt)} to 77 characters.")
-            prompt = prompt[:77]
+            print(f"Warning: truncating prompt from {len(prompt)} to {MAX_PROMPT_LENGTH} characters.")
         else:
-            print(f"Error: prompt too long ({len(prompt)} chars). Must be <= 77.")
+            print(f"Error: prompt too long ({len(prompt)} chars). Must be <= {MAX_PROMPT_LENGTH}.")
             return 2
 
-    invoke_url = DEFAULT_INVOKE_URL
-    headers = {
-        "Authorization": f"Bearer {api_key}",
-        "Accept": "application/json",
-        "Content-Type": "application/json",
-    }
-    payload = {
-        "prompt": prompt,
-        "slat_cfg_scale": args.slat_cfg_scale,
-        "ss_cfg_scale": args.ss_cfg_scale,
-        "slat_sampling_steps": args.slat_sampling_steps,
-        "ss_sampling_steps": args.ss_sampling_steps,
-        "seed": args.seed,
-    }
-
     t0 = time.perf_counter()
-    resp = requests.post(invoke_url, headers=headers, json=payload, timeout=args.timeout)
-    dt = time.perf_counter() - t0
-    print(f"HTTP {resp.status_code} in {dt:.2f}s")
-
     try:
-        body = resp.json()
-    except ValueError:
-        print(resp.text[:4000])
+        result = generate_glb(
+            prompt=prompt,
+            seed=args.seed,
+            slat_cfg_scale=args.slat_cfg_scale,
+            ss_cfg_scale=args.ss_cfg_scale,
+            slat_sampling_steps=args.slat_sampling_steps,
+            ss_sampling_steps=args.ss_sampling_steps,
+            timeout=args.timeout,
+            truncate=args.truncate,
+        )
+    except (ValueError, TrellisError) as e:
+        print(f"Error: {e}")
         return 2
 
-    if resp.status_code < 200 or resp.status_code >= 300:
-        print(json.dumps(body, indent=2)[:4000])
-        return 2
+    dt = time.perf_counter() - t0
+    print(f"Generated in {dt:.2f}s")
 
-    artifacts = body.get("artifacts") if isinstance(body, dict) else None
-    if not isinstance(artifacts, list) or not artifacts or not isinstance(artifacts[0], dict):
-        print("Error: response did not contain artifacts[0].")
-        print(json.dumps(body, indent=2)[:4000])
-        return 2
-
-    artifact = artifacts[0]
-    if artifact.get("finishReason") and artifact["finishReason"] != "SUCCESS":
-        print(f"Error: finishReason={artifact.get('finishReason')!r}")
-        print(json.dumps(body, indent=2)[:4000])
-        return 2
-
-    b64 = artifact.get("base64")
-    if not isinstance(b64, str) or not b64:
-        print("Error: artifacts[0].base64 missing/empty.")
-        print(json.dumps(body, indent=2)[:4000])
-        return 2
-
-    out_dir = Path(__file__).resolve().parent / "output"
-    out_dir.mkdir(parents=True, exist_ok=True)
-    out_path = out_dir / args.out
-    data = base64.b64decode(b64)
-    out_path.write_bytes(data)
-    print(f"Wrote {out_path} ({len(data)} bytes) seed_used={artifact.get('seed')}")
+    out_path = get_output_dir() / args.out
+    out_path.write_bytes(result.glb_data)
+    print(f"Wrote {out_path} ({len(result.glb_data)} bytes) seed_used={result.seed_used}")
     return 0
 
 
