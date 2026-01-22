@@ -1,0 +1,11 @@
+.env
+.env.local
+.venv/
+__pycache__/
+*.egg-info/
+build/
+dist/
+result.glb
+result.stl
+trellis_nvidia/output/*.glb
+trellis_nvidia/output/*.stl
