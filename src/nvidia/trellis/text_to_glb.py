@@ -1,12 +1,13 @@
 """
-Minimal Trellis client: local PNG -> GLB -> `trellis_nvidia/output/`.
+Trellis text-to-3D: text -> GLB.
 
 Usage:
-  uv run python -m trellis_nvidia.flower_to_glb --in trellis_nvidia/assets/flower.png
+  uv run nvidia-trellis --prompt "Toy armored vehicle, olive green"
+  uv run python -m nvidia.trellis.text_to_glb --prompt "A chair"
 
-Important:
-- The hosted endpoint at `ai.api.nvidia.com` currently rejects arbitrary base64 image inputs and will
-  likely return HTTP 422. This script is kept to quickly test/confirm behavior.
+Notes:
+- Hosted endpoint expects prompt length <= 77 characters.
+- Reads NVIDIA_API_KEY from environment or `.env.local` in project root.
 """
 
 from __future__ import annotations
@@ -39,43 +40,68 @@ def _get_api_key() -> str:
 
 
 def main(argv: list[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(description="Generate a GLB from a local image (Trellis).")
-    default_in = str(Path(__file__).resolve().parent / "assets" / "flower.png")
-    parser.add_argument("--in", dest="in_path", default=default_in, help="Input PNG path.")
+    parser = argparse.ArgumentParser(description="Generate a GLB from a text prompt (Trellis).")
+    parser.add_argument(
+        "--prompt",
+        default="Ergonomic lab chair, metal frame, cushioned seat",
+        help="Text prompt (<= 77 chars).",
+    )
+    parser.add_argument(
+        "--truncate",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Truncate prompt to 77 chars (prevents server-side errors).",
+    )
     parser.add_argument("--seed", type=int, default=0, help="0 means random seed.")
-    parser.add_argument("--timeout", type=float, default=120.0, help="Request timeout seconds.")
-    parser.add_argument("--slat-cfg-scale", type=float, default=3.0)
-    parser.add_argument("--ss-cfg-scale", type=float, default=7.5)
+    parser.add_argument("--timeout", type=float, default=300.0, help="Request timeout seconds.")
+    parser.add_argument(
+        "--slat-cfg-scale",
+        type=float,
+        default=3.0,
+        help="Classifier-free guidance scale for structured latent diffusion.",
+    )
+    parser.add_argument(
+        "--ss-cfg-scale",
+        type=float,
+        default=7.5,
+        help="Classifier-free guidance scale for sparse structure diffusion.",
+    )
     parser.add_argument("--slat-sampling-steps", type=int, default=25)
     parser.add_argument("--ss-sampling-steps", type=int, default=25)
     parser.add_argument(
         "--out",
-        default="flower.glb",
+        default="text.glb",
         help="Output filename (relative to trellis_nvidia/output/).",
     )
     args = parser.parse_args(argv)
 
-    project_root = Path(__file__).resolve().parents[1]
+    project_root = Path(__file__).resolve().parents[3]
     _load_env(project_root)
     api_key = _get_api_key()
     if not api_key:
         print("Error: Missing NVIDIA_API_KEY (set env var or put it in .env.local).")
         return 2
 
-    in_path = Path(args.in_path).expanduser().resolve()
-    if not in_path.exists():
-        print(f"Error: input image not found: {in_path}")
+    prompt = args.prompt.strip()
+    if not prompt:
+        print("Error: prompt cannot be empty.")
         return 2
+    if len(prompt) > 77:
+        if args.truncate:
+            print(f"Warning: truncating prompt from {len(prompt)} to 77 characters.")
+            prompt = prompt[:77]
+        else:
+            print(f"Error: prompt too long ({len(prompt)} chars). Must be <= 77.")
+            return 2
 
-    img_b64 = base64.b64encode(in_path.read_bytes()).decode("utf-8")
-
+    invoke_url = DEFAULT_INVOKE_URL
     headers = {
         "Authorization": f"Bearer {api_key}",
         "Accept": "application/json",
         "Content-Type": "application/json",
     }
     payload = {
-        "image": f"data:image/png;base64,{img_b64}",
+        "prompt": prompt,
         "slat_cfg_scale": args.slat_cfg_scale,
         "ss_cfg_scale": args.ss_cfg_scale,
         "slat_sampling_steps": args.slat_sampling_steps,
@@ -84,7 +110,7 @@ def main(argv: list[str] | None = None) -> int:
     }
 
     t0 = time.perf_counter()
-    resp = requests.post(DEFAULT_INVOKE_URL, headers=headers, json=payload, timeout=args.timeout)
+    resp = requests.post(invoke_url, headers=headers, json=payload, timeout=args.timeout)
     dt = time.perf_counter() - t0
     print(f"HTTP {resp.status_code} in {dt:.2f}s")
 
@@ -127,4 +153,3 @@ def main(argv: list[str] | None = None) -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
-

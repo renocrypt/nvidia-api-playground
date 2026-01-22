@@ -1,11 +1,16 @@
+# Environment
 .env
 .env.local
 .venv/
+
+# Python
 __pycache__/
 *.egg-info/
 build/
 dist/
-result.glb
-result.stl
-trellis_nvidia/output/*.glb
-trellis_nvidia/output/*.stl
+
+# Generated files
+src/nvidia/trellis/output/*.glb
+src/nvidia/trellis/output/*.stl
+*.glb
+*.stl
